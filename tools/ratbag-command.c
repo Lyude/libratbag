@@ -143,6 +143,8 @@ usage(void)
 	       "These commands are for testing purposes and may be removed without notice\n"
 	       "\n"
 	       "  switch-etekcity		Switch the Etekcity mouse active profile\n"
+	       "  gskill-reset-profile N        Reset profile N to factory settings on a\n"
+	       "                                G.Skill mouse\n"
 	       "\n"
 	       "Examples:\n"
 	       "  %s profile active get\n"
