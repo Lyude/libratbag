@@ -148,6 +148,16 @@ struct ratbag_driver {
 	int (*write_profile)(struct ratbag_profile *profile);
 
 	/**
+	 * For the given profile, reset it's contents to the mouse's factory
+	 * defaults.
+	 *
+	 * There is no need to reread the profile from the mouse afterwards to
+	 * retrieve the new profile settings, a read_profile() call will be
+	 * issued after the profile is reset.
+	 */
+	int (*reset_profile)(struct ratbag_profile *profile);
+
+	/**
 	 * Called to mark a previously writen profile as active.
 	 *
 	 * There should be no need to write the profile here, a

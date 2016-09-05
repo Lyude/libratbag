@@ -519,6 +519,13 @@ enum ratbag_device_capability {
 	 * libratbag can be used to query the device as normal.
 	 */
 	RATBAG_DEVICE_CAP_QUERY_CONFIGURATION,
+
+	/**
+	 * The device has the capability to replace all of the settings in a
+	 * profile to it's default settings, as specified by the mouse
+	 * manufacturer.
+	 */
+	RATBAG_DEVICE_CAP_RESET_PROFILE,
 };
 
 /**
@@ -663,6 +670,19 @@ ratbag_profile_is_active(struct ratbag_profile *profile);
  */
 enum ratbag_error_code
 ratbag_profile_set_active(struct ratbag_profile *profile);
+
+/**
+ * @ingroup profile
+ *
+ * Reset the given profile to the device manufacturer's defaults. The profile
+ * is then reread from the mouse.
+ *
+ * @param profile The profile to reset.
+ *
+ * @return 0 on success or an error code otherwise
+ */
+enum ratbag_error_code
+ratbag_profile_reset(struct ratbag_profile *profile);
 
 /**
  * @ingroup profile

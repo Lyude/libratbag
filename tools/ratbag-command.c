@@ -102,6 +102,7 @@ usage(void)
 	       "  profile active get		Print the currently active profile\n"
 	       "  profile active set N		Set profile N as to the  active profile\n"
 	       "  profile N {COMMAND}		Use profile N for COMMAND\n"
+	       "  reset                         Reset the given profile to manufacturer defaults\n"
 	       "\n"
 	       "Resolution Commands\n"
 	       "  Resolution commands work on the given profile, or on the\n"
@@ -1563,6 +1564,33 @@ static const struct ratbag_cmd cmd_profile_active = {
 };
 
 static int
+ratbag_cmd_profile_reset(const struct ratbag_cmd *cmd,
+			 struct ratbag *ratbag,
+			 struct ratbag_cmd_options *options,
+			 int argc, char **argv)
+{
+	struct ratbag_device *device;
+	struct ratbag_profile *profile;
+	enum ratbag_error_code rc;
+
+	device = options->device;
+	profile = options->profile;
+
+	rc = ratbag_profile_reset(profile);
+	if (rc == ERR_UNSUPPORTED)
+		error("Device does not support resetting profiles\n");
+
+	return rc;
+}
+
+static const struct ratbag_cmd cmd_profile_reset = {
+	.name = "reset",
+	.cmd = ratbag_cmd_profile_reset,
+	.flags = FLAG_NEED_DEVICE | FLAG_NEED_PROFILE,
+	.subcommands = { NULL },
+};
+
+static int
 ratbag_cmd_profile(const struct ratbag_cmd *cmd,
 		   struct ratbag *ratbag,
 		   struct ratbag_cmd_options *options,
@@ -1615,6 +1643,7 @@ static const struct ratbag_cmd cmd_profile = {
 		&cmd_profile_active,
 		&cmd_resolution,
 		&cmd_button,
+		&cmd_profile_reset,
 		NULL,
 	},
 };

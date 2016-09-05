@@ -719,6 +719,26 @@ ratbag_profile_is_active(struct ratbag_profile *profile)
 	return profile->is_active;
 }
 
+LIBRATBAG_EXPORT enum ratbag_error_code
+ratbag_profile_reset(struct ratbag_profile *profile)
+{
+	struct ratbag_device *device = profile->device;
+	int rc;
+
+	if (!ratbag_device_has_capability(device, RATBAG_DEVICE_CAP_RESET_PROFILE))
+		return RATBAG_ERROR_CAPABILITY;
+
+	assert(device->driver->reset_profile);
+	rc = device->driver->reset_profile(profile);
+	if (rc)
+		return RATBAG_ERROR_DEVICE;
+
+	assert(device->driver->read_profile);
+	device->driver->read_profile(profile, profile->index);
+
+	return RATBAG_SUCCESS;
+}
+
 LIBRATBAG_EXPORT unsigned int
 ratbag_device_get_num_profiles(struct ratbag_device *device)
 {
