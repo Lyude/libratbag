@@ -195,6 +195,11 @@ struct gskill_button_cfg {
 	} params;
 } __attribute__((packed));
 
+struct gskill_action_mapping {
+	struct gskill_button_cfg config;
+	struct ratbag_button_action action;
+};
+
 struct gskill_profile_report {
 	uint16_t                  :16;
 	uint8_t profile_num;
@@ -228,6 +233,34 @@ struct gskill_profile_report {
 _Static_assert(sizeof(struct gskill_profile_report) == GSKILL_REPORT_SIZE_PROFILE,
 	       "Size of gskill_profile_report isn't 644");
 
+enum ratbag_button_type gskill_button_type_mapping[] = {
+	RATBAG_BUTTON_TYPE_LEFT,
+	RATBAG_BUTTON_TYPE_RIGHT,
+	RATBAG_BUTTON_TYPE_MIDDLE,
+	RATBAG_BUTTON_TYPE_THUMB,
+	RATBAG_BUTTON_TYPE_THUMB2,
+	RATBAG_BUTTON_TYPE_RESOLUTION_CYCLE_UP,
+	RATBAG_BUTTON_TYPE_THUMB3,
+	RATBAG_BUTTON_TYPE_THUMB4,
+	RATBAG_BUTTON_TYPE_WHEEL_UP,
+	RATBAG_BUTTON_TYPE_WHEEL_DOWN,
+};
+
+struct gskill_button_function_mapping {
+	enum gskill_button_function_type type;
+	struct ratbag_button_action action;
+};
+
+static const struct gskill_button_function_mapping gskill_button_function_mapping[] = {
+	{ GSKILL_BUTTON_FUNCTION_MACRO,              BUTTON_ACTION_MACRO },
+	{ GSKILL_BUTTON_FUNCTION_DPI_UP,             BUTTON_ACTION_SPECIAL(RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_UP) },
+	{ GSKILL_BUTTON_FUNCTION_DPI_DOWN,           BUTTON_ACTION_SPECIAL(RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_DOWN) },
+	{ GSKILL_BUTTON_FUNCTION_CYCLE_DPI_UP,       BUTTON_ACTION_SPECIAL(RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_CYCLE_UP) },
+	{ GSKILL_BUTTON_FUNCTION_CYCLE_PROFILE_UP,   BUTTON_ACTION_SPECIAL(RATBAG_BUTTON_ACTION_SPECIAL_PROFILE_CYCLE_UP) },
+	{ GSKILL_BUTTON_FUNCTION_CYCLE_PROFILE_DOWN, BUTTON_ACTION_SPECIAL(RATBAG_BUTTON_ACTION_SPECIAL_PROFILE_DOWN) },
+	{ GSKILL_BUTTON_FUNCTION_DISABLE,            BUTTON_ACTION_NONE },
+};
+
 struct gskill_profile_data {
 	struct gskill_profile_report report;
 	uint8_t res_idx_to_dev_idx[GSKILL_NUM_DPI];
@@ -236,6 +269,32 @@ struct gskill_profile_data {
 struct gskill_data {
 	struct gskill_profile_data profile_data[GSKILL_PROFILE_MAX];
 };
+
+static const struct ratbag_button_action *
+gskill_button_function_to_action(enum gskill_button_function_type type)
+{
+	const struct gskill_button_function_mapping *mapping;
+
+	ARRAY_FOR_EACH(gskill_button_function_mapping, mapping) {
+		if (mapping->type == type)
+			return &mapping->action;
+	}
+
+	return NULL;
+}
+
+static enum gskill_button_function_type
+gskill_button_function_from_action(const struct ratbag_button_action *action)
+{
+	const struct gskill_button_function_mapping *mapping;
+
+	ARRAY_FOR_EACH(gskill_button_function_mapping, mapping) {
+		if (ratbag_button_action_match(&mapping->action, action))
+			return mapping->type;
+	}
+
+	return GSKILL_BUTTON_FUNCTION_DISABLE;
+}
 
 static uint8_t
 gskill_calculate_checksum(const uint8_t *buf, size_t len)
@@ -746,6 +805,171 @@ gskill_reset_profile(struct ratbag_profile *profile)
 }
 
 static void
+gskill_read_button(struct ratbag_button *button)
+{
+	struct ratbag_profile *profile = button->profile;
+	struct ratbag_device *device = profile->device;
+	struct gskill_data *drv_data = ratbag_get_drv_data(device);
+	struct gskill_profile_report *report =
+		&drv_data->profile_data[profile->index].report;
+	struct gskill_button_cfg *bcfg;
+	struct ratbag_button_action *act = &button->action;
+
+	button->type = gskill_button_type_mapping[button->index];
+	bcfg = &report->btn_cfgs[button->index];
+
+	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_BUTTON);
+	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_SPECIAL);
+	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_KEY);
+
+	/* Parse any parameters that might accompany the action type */
+	switch (bcfg->type) {
+	case GSKILL_BUTTON_FUNCTION_WHEEL:
+		act->type = RATBAG_BUTTON_ACTION_TYPE_SPECIAL;
+
+		if (bcfg->params.wheel.direction == GSKILL_WHEEL_SCROLL_UP)
+			act->action.special =
+				RATBAG_BUTTON_ACTION_SPECIAL_WHEEL_UP;
+		else
+			act->action.special =
+				RATBAG_BUTTON_ACTION_SPECIAL_WHEEL_DOWN;
+		break;
+	case GSKILL_BUTTON_FUNCTION_MOUSE:
+		act->type = RATBAG_BUTTON_ACTION_TYPE_BUTTON;
+
+		switch (bcfg->params.mouse.button_mask) {
+		case GSKILL_BTN_MASK_LEFT:
+			act->action.button = RATBAG_BUTTON_TYPE_LEFT;
+			break;
+		case GSKILL_BTN_MASK_RIGHT:
+			act->action.button = RATBAG_BUTTON_TYPE_RIGHT;
+			break;
+		case GSKILL_BTN_MASK_MIDDLE:
+			act->action.button = RATBAG_BUTTON_TYPE_MIDDLE;
+			break;
+		case GSKILL_BTN_MASK_SIDE:
+			act->action.button = RATBAG_BUTTON_TYPE_SIDE;
+			break;
+		case GSKILL_BTN_MASK_EXTRA:
+			act->action.button = RATBAG_BUTTON_TYPE_EXTRA;
+			break;
+		}
+		break;
+	case GSKILL_BUTTON_FUNCTION_KBD:
+		act->type = RATBAG_BUTTON_ACTION_TYPE_KEY;
+		act->action.key.key =
+			ratbag_hidraw_get_keycode_from_keyboard_usage(
+			    device, bcfg->params.kbd.hid_code);
+		break;
+	case GSKILL_BUTTON_FUNCTION_CONSUMER:
+		act->type = RATBAG_BUTTON_ACTION_TYPE_KEY;
+		act->action.key.key =
+			ratbag_hidraw_get_keycode_from_consumer_usage(
+			    device, bcfg->params.consumer.code);
+		break;
+	case GSKILL_BUTTON_FUNCTION_DPI_UP:
+	case GSKILL_BUTTON_FUNCTION_DPI_DOWN:
+	case GSKILL_BUTTON_FUNCTION_CYCLE_DPI_UP:
+	case GSKILL_BUTTON_FUNCTION_CYCLE_PROFILE_UP:
+	case GSKILL_BUTTON_FUNCTION_DISABLE:
+		*act = *gskill_button_function_to_action(bcfg->type);
+		break;
+	default:
+		break;
+	}
+}
+
+static int
+gskill_write_button(struct ratbag_button *button,
+		    const struct ratbag_button_action *action)
+{
+	struct ratbag_profile *profile = button->profile;
+	struct ratbag_device *device = profile->device;
+	struct gskill_data *drv_data = ratbag_get_drv_data(device);
+	struct gskill_profile_data *pdata =
+		&drv_data->profile_data[profile->index];
+	struct gskill_button_cfg *bcfg = &pdata->report.btn_cfgs[button->index];
+	uint16_t code = 0;
+	int rc;
+
+	memset(&bcfg->params, 0, sizeof(bcfg->params));
+
+	switch (action->type) {
+	case RATBAG_BUTTON_ACTION_TYPE_SPECIAL:
+		switch (action->action.special) {
+		case RATBAG_BUTTON_ACTION_SPECIAL_WHEEL_UP:
+			bcfg->type = GSKILL_BUTTON_FUNCTION_WHEEL;
+			bcfg->params.wheel.direction = GSKILL_WHEEL_SCROLL_UP;
+			break;
+		case RATBAG_BUTTON_ACTION_SPECIAL_WHEEL_DOWN:
+			bcfg->type = GSKILL_BUTTON_FUNCTION_WHEEL;
+			bcfg->params.wheel.direction = GSKILL_WHEEL_SCROLL_DOWN;
+			break;
+		case RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_CYCLE_UP:
+		case RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_UP:
+		case RATBAG_BUTTON_ACTION_SPECIAL_RESOLUTION_DOWN:
+		case RATBAG_BUTTON_ACTION_SPECIAL_PROFILE_CYCLE_UP:
+		case RATBAG_BUTTON_ACTION_SPECIAL_PROFILE_UP:
+		case RATBAG_BUTTON_ACTION_SPECIAL_PROFILE_DOWN:
+			bcfg->type = gskill_button_function_from_action(action);
+			break;
+		default:
+			return -EINVAL;
+		}
+
+		break;
+	case RATBAG_BUTTON_ACTION_TYPE_BUTTON:
+		bcfg->type = GSKILL_BUTTON_FUNCTION_MOUSE;
+
+		switch (action->action.button) {
+		case RATBAG_BUTTON_TYPE_LEFT:
+			bcfg->params.mouse.button_mask = GSKILL_BTN_MASK_LEFT;
+			break;
+		case RATBAG_BUTTON_TYPE_RIGHT:
+			bcfg->params.mouse.button_mask = GSKILL_BTN_MASK_RIGHT;
+			break;
+		case RATBAG_BUTTON_TYPE_MIDDLE:
+			bcfg->params.mouse.button_mask = GSKILL_BTN_MASK_MIDDLE;
+			break;
+		case RATBAG_BUTTON_TYPE_SIDE:
+			bcfg->params.mouse.button_mask = GSKILL_BTN_MASK_SIDE;
+			break;
+		case RATBAG_BUTTON_TYPE_EXTRA:
+			bcfg->params.mouse.button_mask = GSKILL_BTN_MASK_EXTRA;
+			break;
+		default:
+			return -EINVAL;
+		}
+		break;
+	case RATBAG_BUTTON_ACTION_TYPE_KEY:
+		code = ratbag_hidraw_get_keyboard_usage_from_keycode(
+		    device, action->action.key.key);
+		if (code) {
+			bcfg->type = GSKILL_BUTTON_FUNCTION_KBD;
+			bcfg->params.kbd.hid_code = code;
+		} else {
+			code = ratbag_hidraw_get_consumer_usage_from_keycode(
+			    device, action->action.key.key);
+
+			bcfg->type = GSKILL_BUTTON_FUNCTION_CONSUMER;
+			bcfg->params.consumer.code = code;
+		}
+		break;
+	case RATBAG_BUTTON_ACTION_TYPE_NONE:
+		bcfg->type = GSKILL_BUTTON_FUNCTION_DISABLE;
+		break;
+	default:
+		break;
+	}
+
+	rc = gskill_do_write_profile(device, &pdata->report);
+	if (rc < 0)
+		return rc;
+
+	return 0;
+}
+
+static void
 gskill_remove(struct ratbag_device *device)
 {
 	ratbag_close_hidraw(device);
@@ -762,4 +986,6 @@ struct ratbag_driver gskill_driver = {
 	.reset_profile = gskill_reset_profile,
 	.set_active_profile = gskill_set_active_profile,
 	.write_resolution_dpi = gskill_write_resolution_dpi,
+	.read_button = gskill_read_button,
+	.write_button = gskill_write_button,
 };
