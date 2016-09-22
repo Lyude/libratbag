@@ -40,11 +40,13 @@
 
 /* Commands */
 #define GSKILL_GET_CURRENT_PROFILE_NUM 0x3
+#define GSKILL_GET_SET_MACRO           0x4
 #define GSKILL_GET_SET_PROFILE         0x5
 #define GSKILL_GENERAL_CMD             0xc
 
-#define GSKILL_REPORT_SIZE_PROFILE 644
-#define GSKILL_REPORT_SIZE_CMD       9
+#define GSKILL_REPORT_SIZE_PROFILE  644
+#define GSKILL_REPORT_SIZE_CMD        9
+#define GSKILL_REPORT_SIZE_MACRO   2052
 
 #define GSKILL_CHECKSUM_OFFSET 3
 
@@ -233,6 +235,45 @@ struct gskill_profile_report {
 _Static_assert(sizeof(struct gskill_profile_report) == GSKILL_REPORT_SIZE_PROFILE,
 	       "Size of gskill_profile_report isn't 644");
 
+struct gskill_macro_delay {
+	uint8_t tag; /* should be 0x1 to indicate delay */
+	uint16_t count;
+} __attribute__((packed));
+
+struct gskill_macro_report {
+	/* yes, the report can be both at offset 0 and 1 :( */
+	union {
+		struct {
+			uint8_t result;
+			uint8_t report_id;
+		} read;
+		struct {
+			uint8_t report_id;
+			uint8_t :8; /* unused */
+		} write;
+	} header;
+
+	uint8_t macro_num;
+	uint8_t checksum;
+
+	enum {
+		GSKILL_MACRO_METHOD_BUTTON_PRESS = 0x5,
+		GSKILL_MACRO_METHOD_BUTTON_RELEASE = 0x1,
+		GSKILL_MACRO_METHOD_BUTTON_LOOP_START = 0x7,
+		GSKILL_MACRO_METHOD_BUTTON_LOOP_END = 0x0
+	} macro_exec_method :8;
+
+	uint8_t loop_count;
+	uint8_t please_set_me_to_1_thank_you;
+	uint16_t macro_length;
+	uint8_t macro_name_length;
+	char macro_name[256];
+	uint8_t macro_content[1786];
+} __attribute__((packed));
+
+_Static_assert(sizeof(struct gskill_macro_report) == GSKILL_REPORT_SIZE_MACRO,
+	       "Size of gskill_macro_report is wrong");
+
 enum ratbag_button_type gskill_button_type_mapping[] = {
 	RATBAG_BUTTON_TYPE_LEFT,
 	RATBAG_BUTTON_TYPE_RIGHT,
@@ -264,6 +305,8 @@ static const struct gskill_button_function_mapping gskill_button_function_mappin
 struct gskill_profile_data {
 	struct gskill_profile_report report;
 	uint8_t res_idx_to_dev_idx[GSKILL_NUM_DPI];
+
+	struct gskill_macro_report macros[GSKILL_BUTTON_MAX];
 };
 
 struct gskill_data {
@@ -573,6 +616,301 @@ gskill_get_firmware_version(struct ratbag_device *device) {
 	return buf[4];
 }
 
+static unsigned int
+gskill_misc_macro_code_to_keycode(uint8_t code)
+{
+	unsigned int keycode;
+
+	switch (code & 0x0f) {
+	case 0x0: keycode = KEY_LEFTCTRL;   break;
+	case 0x1: keycode = KEY_LEFTSHIFT;  break;
+	case 0x2: keycode = KEY_LEFTALT;    break;
+	case 0x3: keycode = KEY_LEFTMETA;   break;
+	case 0x4: keycode = KEY_RIGHTCTRL;  break;
+	case 0x5: keycode = KEY_RIGHTSHIFT; break;
+	case 0x6: keycode = KEY_RIGHTALT;   break;
+	case 0x7: keycode = KEY_RIGHTMETA;  break;
+	case 0x8: keycode = BTN_LEFT;       break;
+	case 0x9: keycode = BTN_RIGHT;      break;
+	case 0xa: keycode = BTN_MIDDLE;     break;
+	case 0xb: keycode = BTN_SIDE;       break;
+	case 0xc: keycode = BTN_EXTRA;      break;
+	default: keycode = 0;               break;
+	}
+
+	return keycode;
+}
+
+static uint8_t
+gskill_macro_code_from_event(struct ratbag_device *device,
+			     struct ratbag_macro_event *event)
+{
+	uint8_t macro_code;
+
+	/*
+	 * The miscellanious keycodes are ORd with 0x70 to indicate press, 0xF0
+	 * to indicate release
+	 */
+	if (event->type == RATBAG_MACRO_EVENT_KEY_PRESSED)
+		macro_code = 0x70;
+	else
+		macro_code = 0xF0;
+
+	switch (event->event.key) {
+	case KEY_LEFTCTRL:   macro_code |= 0x00; break;
+	case KEY_LEFTSHIFT:  macro_code |= 0x01; break;
+	case KEY_LEFTALT:    macro_code |= 0x02; break;
+	case KEY_LEFTMETA:   macro_code |= 0x03; break;
+	case KEY_RIGHTCTRL:  macro_code |= 0x04; break;
+	case KEY_RIGHTSHIFT: macro_code |= 0x05; break;
+	case KEY_RIGHTALT:   macro_code |= 0x06; break;
+	case KEY_RIGHTMETA:  macro_code |= 0x07; break;
+	case BTN_LEFT:       macro_code |= 0x08; break;
+	case BTN_RIGHT:      macro_code |= 0x09; break;
+	case BTN_MIDDLE:     macro_code |= 0x0a; break;
+	case BTN_SIDE:       macro_code |= 0x0b; break;
+	case BTN_EXTRA:      macro_code |= 0x0c; break;
+	case KEY_SCROLLDOWN: macro_code  = 0x7e; break;
+	case KEY_SCROLLUP:   macro_code  = 0xfe; break;
+	default:
+		macro_code = ratbag_hidraw_get_keyboard_usage_from_keycode(
+		    device, event->event.key);
+
+		if (event->type == RATBAG_MACRO_EVENT_KEY_RELEASED)
+			macro_code += 0x80;
+		break;
+	}
+
+	return macro_code;
+}
+
+/* TODO: judging from how profile names are handled, it's also very likely that
+ * the encoding of macro names isn't actually in UTF-8 (profile names seem to
+ * be encoded like "t\0h\0i\0s\0"). While this will work if ratbag is the only
+ * program reading/writing from the mouse's profiles, this may intimidate
+ * G.Skill's configuration program
+ */
+static struct ratbag_button_macro *
+gskill_macro_from_report(struct ratbag_device *device,
+			 const struct gskill_macro_report *report)
+{
+	struct ratbag_button_macro *macro;
+	enum ratbag_macro_event_type type;
+	char macro_name[256] = {0};
+	const uint8_t *data = (uint8_t*)&report->macro_content;
+	unsigned int event_data;
+	int i, event_idx, increment;
+
+	/* The macro is empty */
+	if (report->macro_length == 0xff) {
+		return NULL;
+	} else if (report->macro_length > sizeof(report->macro_content)) {
+		log_error(device->ratbag,
+			  "Macro length too large (max should be %ld, we got %d)\n",
+			  sizeof(report->macro_content), report->macro_length);
+		return NULL;
+	}
+
+	/*
+	 * Since the length is only 8 bits long, it's impossible to specify a
+	 * length that's too large for the macro name
+	 */
+	memcpy(macro_name, &report->macro_name, report->macro_name_length);
+	macro = ratbag_button_macro_new(macro_name);
+
+	for (i = 0, event_idx = 0, increment = 1;
+	     i < report->macro_length;
+	     i += increment, increment = 1, event_idx++) {
+		const struct gskill_macro_delay *delay;
+
+		switch (data[i]) {
+		case 0x01: /* delay */
+			delay = (struct gskill_macro_delay*)&data[i];
+			increment = sizeof(struct gskill_macro_delay);
+
+			type = RATBAG_MACRO_EVENT_WAIT;
+			event_data = delay->count;
+
+			break;
+		case 0x04 ... 0x6a: /* HID KBD code, press */
+			type = RATBAG_MACRO_EVENT_KEY_PRESSED;
+			event_data = ratbag_hidraw_get_keycode_from_keyboard_usage(
+			    device, data[i]);
+			break;
+		case 0x70 ... 0x7c: /* KBD modifier/mouse button press */
+			type = RATBAG_MACRO_EVENT_KEY_PRESSED;
+			event_data = gskill_misc_macro_code_to_keycode(data[i]);
+			break;
+		case 0x7e:
+			type = RATBAG_MACRO_EVENT_KEY_PRESSED;
+			event_data = KEY_SCROLLDOWN;
+			break;
+		case 0x84 ... 0xef: /* HID KBD code, release */
+			type = RATBAG_MACRO_EVENT_KEY_RELEASED;
+			event_data = ratbag_hidraw_get_keycode_from_keyboard_usage(
+			    device, data[i] - 0x80);
+			break;
+		case 0xf0 ... 0xfc: /* KBD modifier/mouse button release */
+			type = RATBAG_MACRO_EVENT_KEY_RELEASED;
+			event_data = gskill_misc_macro_code_to_keycode(data[i]);
+			break;
+		case 0xfe:
+			type = RATBAG_MACRO_EVENT_KEY_PRESSED;
+			event_data = KEY_SCROLLUP;
+			break;
+		}
+
+		ratbag_button_macro_set_event(macro, event_idx, type,
+					      event_data);
+	}
+
+	return macro;
+}
+
+/* FIXME: the macro struct here should be a const, but it looks like there's a
+ * couple of functions in ratbag that need to have a const qualifier added to
+ * their function declarations
+ */
+static struct gskill_macro_report *
+gskill_macro_to_report(struct ratbag_device *device,
+		       struct ratbag_button_macro *macro,
+		       unsigned int profile, unsigned int button)
+{
+	struct gskill_data *drv_data = ratbag_get_drv_data(device);
+	struct gskill_macro_report *report =
+		&drv_data->profile_data[profile].macros[button];
+	struct gskill_macro_delay *delay;
+	unsigned int event_num = ratbag_button_macro_get_num_events(macro);
+	struct ratbag_macro_event *event;
+	uint8_t *buf = report->macro_content;
+	int profile_pos, increment, event_idx;
+
+	memset(report, 0, sizeof(*report));
+	strcpy(macro->macro.name, report->macro_name);
+	report->macro_name_length = strlen(macro->macro.name);
+
+	report->macro_num = (profile * 10) + button;
+	report->macro_exec_method = GSKILL_MACRO_METHOD_BUTTON_PRESS;
+	report->loop_count = 0;
+	report->please_set_me_to_1_thank_you = 1; /* No prob! Happy to help :) */
+
+	for (profile_pos = 0, increment = 1, event_idx = 0;
+	     event_idx < (signed)event_num;
+	     event_idx++, profile_pos += increment, increment = 1) {
+		event = &macro->macro.events[event_idx];
+
+		switch (event->type) {
+		case RATBAG_MACRO_EVENT_WAIT:
+			delay = (struct gskill_macro_delay*)&buf[profile_pos];
+			increment = sizeof(*delay);
+
+			delay->tag = 1;
+			delay->count = event->event.timeout;
+			break;
+		case RATBAG_MACRO_EVENT_KEY_PRESSED:
+		case RATBAG_MACRO_EVENT_KEY_RELEASED:
+			buf[profile_pos] = gskill_macro_code_from_event(device,
+									event);
+			break;
+		case RATBAG_MACRO_EVENT_INVALID:
+		case RATBAG_MACRO_EVENT_NONE:
+			goto fin;
+		}
+	}
+
+fin:
+	report->macro_length = profile_pos;
+
+	return report;
+}
+
+static struct gskill_macro_report *
+gskill_read_button_macro(struct ratbag_device *device,
+			 unsigned int profile, unsigned int button)
+{
+	struct gskill_data *drv_data = ratbag_get_drv_data(device);
+	struct gskill_macro_report *report =
+		&drv_data->profile_data[profile].macros[button];
+	uint8_t checksum;
+	uint8_t macro_num = (profile * 10) + button;
+	uint8_t buf[GSKILL_REPORT_SIZE_CMD] = { 0x0c, 0xc4, 0x0b, macro_num, 0x0 };
+	int rc;
+
+	rc = ratbag_hidraw_raw_request(device, GSKILL_GENERAL_CMD, buf,
+				       sizeof(buf), HID_FEATURE_REPORT,
+				       HID_REQ_SET_REPORT);
+	if (rc < 0) {
+		log_error(device->ratbag,
+			  "Failed to retrieve macro for profile %d for button %d: %d\n",
+			  profile, button, rc);
+		return NULL;
+	}
+
+	/* Wait for the device to be ready */
+	msleep(100);
+
+	rc = ratbag_hidraw_raw_request(device, GSKILL_GET_SET_MACRO,
+				       (uint8_t*)report, sizeof(*report),
+				       HID_FEATURE_REPORT, HID_REQ_GET_REPORT);
+	if (rc < (signed)sizeof(*report)) {
+		log_error(device->ratbag,
+			  "Failed to retrieve macro for profile %d for button %d: %d\n",
+			  profile, button, rc);
+		return NULL;
+	}
+
+	checksum = gskill_calculate_checksum((uint8_t*)report, sizeof(*report));
+	if (checksum != report->checksum) {
+		log_error(device->ratbag,
+			  "Invalid checksum on macro for profile %d button %d\n",
+			  profile, button);
+		return NULL;
+	}
+
+	return report;
+}
+
+static int
+gskill_write_button_macro(struct ratbag_device *device,
+			  struct gskill_macro_report *report)
+{
+	unsigned int profile = report->macro_num / 10;
+	unsigned int button = report->macro_num % 10;
+	uint8_t buf[GSKILL_REPORT_SIZE_CMD] = { 0x0c, 0xc4, 0x0b,
+		report->macro_num, 0x1 };
+	int rc;
+
+	rc = ratbag_hidraw_raw_request(device, GSKILL_GENERAL_CMD, buf,
+				       sizeof(buf), HID_FEATURE_REPORT,
+				       HID_REQ_SET_REPORT);
+	if (rc < 0) {
+		log_error(device->ratbag,
+			  "Failed to set macro to write for profile %d button %d: %d\n",
+			  profile, button, rc);
+		return rc;
+	}
+
+	/* Wait for the device to be ready */
+	msleep(200);
+
+	memset(&report->header, 0, sizeof(report->header));
+	report->header.write.report_id = 0x4;
+	report->checksum = gskill_calculate_checksum((uint8_t*)report,
+						     sizeof(*report));
+
+	rc = ratbag_hidraw_raw_request(device, GSKILL_GET_SET_MACRO,
+				       (uint8_t*)report, sizeof(*report),
+				       HID_FEATURE_REPORT, HID_REQ_SET_REPORT);
+	if (rc < 0) {
+		log_error(device->ratbag,
+			  "Failed to write macro for profile %d button %d to mouse: %d\n",
+			  profile, button, rc);
+		return rc;
+	}
+
+	return 0;
+}
+
 static int
 gskill_probe(struct ratbag_device *device)
 {
@@ -617,6 +955,8 @@ gskill_probe(struct ratbag_device *device)
 
 	ratbag_device_set_capability(device, RATBAG_DEVICE_CAP_QUERY_CONFIGURATION);
 	ratbag_device_set_capability(device, RATBAG_DEVICE_CAP_RESET_PROFILE);
+	ratbag_device_set_capability(device, RATBAG_DEVICE_CAP_BUTTON_KEY);
+	ratbag_device_set_capability(device, RATBAG_DEVICE_CAP_BUTTON_MACROS);
 
 	ret = gskill_get_active_profile_idx(device);
 	if (ret < 0)
@@ -812,6 +1152,8 @@ gskill_read_button(struct ratbag_button *button)
 	struct gskill_data *drv_data = ratbag_get_drv_data(device);
 	struct gskill_profile_report *report =
 		&drv_data->profile_data[profile->index].report;
+	struct gskill_macro_report *macro_report;
+	struct ratbag_button_macro *macro;
 	struct gskill_button_cfg *bcfg;
 	struct ratbag_button_action *act = &button->action;
 
@@ -821,6 +1163,7 @@ gskill_read_button(struct ratbag_button *button)
 	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_BUTTON);
 	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_SPECIAL);
 	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_KEY);
+	ratbag_button_enable_action_type(button, RATBAG_BUTTON_ACTION_TYPE_MACRO);
 
 	/* Parse any parameters that might accompany the action type */
 	switch (bcfg->type) {
@@ -874,9 +1217,30 @@ gskill_read_button(struct ratbag_button *button)
 	case GSKILL_BUTTON_FUNCTION_DISABLE:
 		*act = *gskill_button_function_to_action(bcfg->type);
 		break;
+	case GSKILL_BUTTON_FUNCTION_MACRO:
+		macro_report = gskill_read_button_macro(device,
+							button->profile->index,
+							button->index);
+		if (!macro_report)
+			goto err;
+
+		macro = gskill_macro_from_report(device,
+						 macro_report);
+		if (!macro)
+			goto err;
+
+		act->type = RATBAG_BUTTON_ACTION_TYPE_MACRO;
+		ratbag_button_copy_macro(button, macro);
+		ratbag_button_macro_unref(macro);
+		break;
 	default:
 		break;
 	}
+
+	return;
+
+err:
+	act->type = RATBAG_BUTTON_ACTION_TYPE_NONE;
 }
 
 static int
@@ -885,6 +1249,7 @@ gskill_write_button(struct ratbag_button *button,
 {
 	struct ratbag_profile *profile = button->profile;
 	struct ratbag_device *device = profile->device;
+	struct ratbag_button_macro *macro = NULL;
 	struct gskill_data *drv_data = ratbag_get_drv_data(device);
 	struct gskill_profile_data *pdata =
 		&drv_data->profile_data[profile->index];
@@ -892,6 +1257,7 @@ gskill_write_button(struct ratbag_button *button,
 	uint16_t code = 0;
 	int rc;
 
+	macro = container_of(action->macro, macro, macro);
 	memset(&bcfg->params, 0, sizeof(bcfg->params));
 
 	switch (action->type) {
@@ -954,6 +1320,14 @@ gskill_write_button(struct ratbag_button *button,
 			bcfg->type = GSKILL_BUTTON_FUNCTION_CONSUMER;
 			bcfg->params.consumer.code = code;
 		}
+		break;
+	case RATBAG_BUTTON_ACTION_TYPE_MACRO:
+		bcfg->type = GSKILL_BUTTON_FUNCTION_MACRO;
+		gskill_write_button_macro(
+		    device, gskill_macro_to_report(device, macro,
+						   profile->index,
+						   button->index));
+
 		break;
 	case RATBAG_BUTTON_ACTION_TYPE_NONE:
 		bcfg->type = GSKILL_BUTTON_FUNCTION_DISABLE;
