@@ -499,6 +499,22 @@ gskill_read_resolutions(struct ratbag_profile *profile,
 }
 
 static int
+gskill_get_firmware_version(struct ratbag_device *device) {
+	uint8_t buf[GSKILL_REPORT_SIZE_CMD] = { 0x0c, 0xc4, 0x08 };
+	int rc;
+
+	rc = gskill_general_cmd(device, buf);
+	if (rc < 0) {
+		log_error(device->ratbag,
+			  "Failed to read the firmware version of the mouse: %d\n",
+			  rc);
+		return rc;
+	}
+
+	return buf[4];
+}
+
+static int
 gskill_probe(struct ratbag_device *device)
 {
 	struct gskill_data *drv_data = NULL;
@@ -529,6 +545,13 @@ gskill_probe(struct ratbag_device *device)
 		if (ret < 0)
 			goto err;
 	}
+
+	ret = gskill_get_firmware_version(device);
+	if (ret < 0)
+		goto err;
+
+	log_debug(device->ratbag,
+		 "Firmware version: %d\n", ret);
 
 	ratbag_device_init_profiles(device, GSKILL_PROFILE_MAX, GSKILL_NUM_DPI,
 				    GSKILL_BUTTON_MAX);
