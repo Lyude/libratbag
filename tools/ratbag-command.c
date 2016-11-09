@@ -101,6 +101,8 @@ usage(void)
 	       "Profile Commands:\n"
 	       "  profile active get		Print the currently active profile\n"
 	       "  profile active set N		Set profile N as to the  active profile\n"
+	       "  profile enabled get           Check if profile is enabled\n"
+	       "  profile enabled set E         Set profile enabled state to E\n"
 	       "  profile N {COMMAND}		Use profile N for COMMAND\n"
 	       "\n"
 	       "Resolution Commands\n"
@@ -232,6 +234,17 @@ ratbag_cmd_get_active_resolution(struct ratbag_profile *profile)
 	return NULL;
 }
 
+static int
+parse_bool(const char *in)
+{
+	if (streq(in, "yes") || streq(in, "true") || streq(in, "1"))
+		return 1;
+	if (streq(in, "no") || streq(in, "false") || streq(in, "0"))
+		return 0;
+
+	return -1;
+}
+
 static inline int
 fill_options(struct ratbag *ratbag,
 	     struct ratbag_cmd_options *options,
@@ -351,7 +364,8 @@ ratbag_cmd_info(const struct ratbag_cmd *cmd,
 		if (!profile)
 			continue;
 
-		printf("  Profile %d%s\n", i,
+		printf("  Profile %d (%sabled)%s\n", i,
+		       ratbag_profile_is_enabled(profile) ? "en" : "dis",
 		       ratbag_profile_is_active(profile) ? " (active)" : "");
 		printf("    Resolutions:\n");
 		for (j = 0; j < ratbag_profile_get_num_resolutions(profile); j++) {
@@ -1563,6 +1577,88 @@ static const struct ratbag_cmd cmd_profile_active = {
 };
 
 static int
+ratbag_cmd_profile_enabled_get(const struct ratbag_cmd *cmd,
+		   struct ratbag *ratbag,
+		   struct ratbag_cmd_options *options,
+		   int argc, char **argv)
+{
+	printf("%sabled\n",
+	       ratbag_profile_is_enabled(options->profile) ? "en" : "dis");
+
+	return SUCCESS;
+}
+
+static const struct ratbag_cmd cmd_profile_enabled_get = {
+	.name = "get",
+	.cmd = ratbag_cmd_profile_enabled_get,
+	.flags = FLAG_NEED_DEVICE | FLAG_NEED_PROFILE,
+	.subcommands = {
+		NULL,
+	},
+};
+
+static int
+ratbag_cmd_profile_enabled_set(const struct ratbag_cmd *cmd,
+			       struct ratbag *ratbag,
+			       struct ratbag_cmd_options *options,
+			       int argc, char **argv)
+{
+	int enable;
+	int rc;
+
+	if (argc < 1)
+		return ERR_USAGE;
+
+	enable = parse_bool(argv[0]);
+	if (enable < 0)
+		return ERR_USAGE;
+
+	if (!ratbag_device_has_capability(options->device,
+					  RATBAG_DEVICE_CAP_DISABLE_PROFILE))
+		return ERR_UNSUPPORTED;
+
+	ratbag_profile_set_enabled(options->profile, enable);
+	rc = ratbag_device_commit(options->device);
+
+	return rc ? ERR_DEVICE : SUCCESS;
+}
+
+static const struct ratbag_cmd cmd_profile_enabled_set = {
+	.name = "set",
+	.cmd = ratbag_cmd_profile_enabled_set,
+	.flags = FLAG_NEED_DEVICE | FLAG_NEED_PROFILE,
+	.subcommands = {
+		NULL,
+	},
+};
+
+static int
+ratbag_cmd_profile_enabled(const struct ratbag_cmd *cmd,
+			   struct ratbag *ratbag,
+			   struct ratbag_cmd_options *options,
+			   int argc, char **argv)
+{
+	if (argc < 1)
+		return ERR_USAGE;
+
+	return run_subcommand(argv[0],
+			      cmd,
+			      ratbag, options,
+			      argc, argv);
+}
+
+static const struct ratbag_cmd cmd_profile_enabled = {
+	.name = "enabled",
+	.cmd = ratbag_cmd_profile_enabled,
+	.flags = FLAG_NEED_DEVICE | FLAG_NEED_PROFILE,
+	.subcommands = {
+		&cmd_profile_enabled_get,
+		&cmd_profile_enabled_set,
+		NULL,
+	},
+};
+
+static int
 ratbag_cmd_profile(const struct ratbag_cmd *cmd,
 		   struct ratbag *ratbag,
 		   struct ratbag_cmd_options *options,
@@ -1613,6 +1709,7 @@ static const struct ratbag_cmd cmd_profile = {
 	.flags = FLAG_NEED_DEVICE,
 	.subcommands = {
 		&cmd_profile_active,
+		&cmd_profile_enabled,
 		&cmd_resolution,
 		&cmd_button,
 		NULL,
